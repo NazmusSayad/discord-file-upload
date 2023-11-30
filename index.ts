@@ -1,9 +1,9 @@
-console.clear()
-require('dotenv').config()
-
 import * as fs from 'fs'
 import axios from 'axios'
+import sharp from 'sharp'
 import FormData from 'form-data'
+// @ts-ignore
+import * as magic from 'detect-file-type'
 
 export type Attachment = {
   id: string
@@ -44,21 +44,60 @@ export default class DiscordMediaUploader {
     })
   }
 
-  async sendFiles(...files: string[]) {
-    try {
-      const formData = new FormData()
-      files.forEach((file) => {
-        formData.append('file', fs.createReadStream(file))
+  async #getExtension(imageBuffer: Buffer) {
+    return new Promise((resolve, reject) => {
+      magic.default.fromBuffer(imageBuffer, (err: any, result: any) => {
+        if (err) reject(err.message)
+        else resolve(result.ext)
       })
+    })
+  }
 
+  async #generateThumbnail(imageBuffer: Buffer): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      sharp(imageBuffer)
+        .resize({
+          withoutEnlargement: true,
+          fit: 'inside',
+          width: 768,
+          height: 768,
+        })
+        .webp({ quality: 75 })
+        .toBuffer((err, buffer) => {
+          if (err) reject(err.message)
+          else resolve(buffer)
+        })
+    })
+  }
+
+  async #generateFormData(file: string) {
+    const formData = new FormData()
+    const image = Buffer.from(file, 'base64')
+    const thumbnail = await this.#generateThumbnail(image)
+
+    formData.append('media-image', image, {
+      filename: 'file.' + (await this.#getExtension(image)),
+    })
+
+    formData.append('media-thumbnail', thumbnail, {
+      filename: 'file.thumbnail.' + (await this.#getExtension(thumbnail)),
+    })
+
+    return formData
+  }
+
+  async uploadFormData(formData: FormData) {
+    try {
       const response = await axios.post<Data>(
         `https://discord.com/api/v10/channels/${this.#CHANNEL_ID}/messages`,
         formData,
         { headers: { Authorization: `Bot ${this.#DISCORD_BOT_TOKEN}` } }
       )
 
-      return this.#formatData(response.data)
+      return response.data
     } catch (error: any) {
+      if (typeof error === 'string') throw new Error(error)
+
       const statusCode = error.response?.statusCode
       if (!statusCode || statusCode < 400 || statusCode >= 500) {
         throw new Error("Something's wrong with the request!")
@@ -68,16 +107,23 @@ export default class DiscordMediaUploader {
     }
   }
 
-  async sendFile(file: string) {
-    return (await this.sendFiles(file))[0]
+  async uploadImage(base64Image: string) {
+    const formData = await this.#generateFormData(base64Image)
+    const data = await this.uploadFormData(formData)
+    return this.#formatData(data)
   }
 }
 
+console.clear()
+require('dotenv').config()
 const uploader = new DiscordMediaUploader(
   process.env.CHANNEL_ID!,
   process.env.DISCORD_BOT_TOKEN!
 )
 
-uploader.sendFiles('./index.ts').then((data) => {
-  console.log(data)
-})
+uploader
+  .uploadImage(fs.readFileSync('./img.jpg', 'base64'))
+  .then((data) => {
+    console.log(data)
+  })
+  .catch(console.log)
